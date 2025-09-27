@@ -201,9 +201,8 @@ func ldapMessageSize(payload []byte) (uint64, error) {
 		return 0, fmt.Errorf("truncated message, need at least %d bytes", 2+n)
 	}
 
-	var contentLen uint64
-	for i := range n {
-		contentLen = (contentLen << 8) | uint64(payload[2+i])
-	}
+	var buf [8]byte
+	copy(buf[8-n:], payload[2:2+n])
+	contentLen := binary.BigEndian.Uint64(buf[:])
 	return uint64(2+n) + contentLen, nil
 }
