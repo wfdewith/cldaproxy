@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -33,12 +34,33 @@ func New(ip net.IP, port int, timeout time.Duration) *Proxy {
 }
 
 func (p *Proxy) Start() {
+	listenConfig := net.ListenConfig{
+		Control: func(network, address string, rawConn syscall.RawConn) error {
+			var innerErr error
+			outerErr := rawConn.Control(func(fd uintptr) {
+				if err := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
+					innerErr = fmt.Errorf("setsockopt IP_TRANSPARENT: %w", err)
+					return
+				}
+				if err := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_RECVORIGDSTADDR, 1); err != nil {
+					innerErr = fmt.Errorf("setsockopt IP_RECVORIGDSTADDR: %w", err)
+					return
+				}
+			})
+			if innerErr != nil {
+				return innerErr
+			}
+			return outerErr
+		},
+	}
+
 	slog.Info("starting proxy", slog.String("listen", p.addr.String()))
-	conn, err := net.ListenUDP("udp4", &p.addr)
+	pConn, err := listenConfig.ListenPacket(context.Background(), "udp4", p.addr.String())
 	if err != nil {
 		slog.Error("failed to start proxy", slog.String("error", err.Error()))
 		os.Exit(2)
 	}
+	conn := pConn.(*net.UDPConn)
 	defer conn.Close()
 
 	for {
