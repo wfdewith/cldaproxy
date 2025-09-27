@@ -25,9 +25,9 @@ type Proxy struct {
 	pool    sync.Pool
 }
 
-func New(ip net.IP, port int, timeout time.Duration) *Proxy {
+func New(port int, timeout time.Duration) *Proxy {
 	return &Proxy{
-		addr:    net.UDPAddr{IP: ip, Port: port},
+		addr:    net.UDPAddr{IP: net.IPv4zero, Port: port},
 		timeout: timeout,
 		pool:    sync.Pool{New: func() any { return msgbufs{buf: make([]byte, 65535), oob: make([]byte, 1024)} }},
 	}

@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"time"
 
@@ -12,17 +11,10 @@ import (
 )
 
 func main() {
-	ip := flag.String("ip", "127.0.0.1", "listen IP")
 	port := flag.Int("port", 3890, "listen port")
 	timeout := flag.Int("timeout", 5, "timeout in seconds for communicating with upstream")
 	debug := flag.Bool("debug", false, "print debugging logs")
 	flag.Parse()
-
-	ipaddr := net.ParseIP(*ip)
-	if ipaddr == nil {
-		fmt.Fprintf(os.Stderr, "invalid IP address: %q\n", *ip)
-		os.Exit(1)
-	}
 
 	if *port < 1 || *port > 65535 {
 		fmt.Fprintf(os.Stderr, "port must be in range 1-65535, got %d\n", *port)
@@ -42,6 +34,6 @@ func main() {
 		logLevel.Set(slog.LevelDebug)
 	}
 
-	proxy := proxy.New(ipaddr, *port, time.Duration(*timeout)*time.Second)
+	proxy := proxy.New(*port, time.Duration(*timeout)*time.Second)
 	proxy.Start()
 }
