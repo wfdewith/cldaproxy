@@ -136,11 +136,11 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 			slog.Warn("LDAP message too large", slog.Uint64("size", msgSize), srcAttr, dstAttr)
 			return
 		}
-		if uint64(n) > msgSize {
-			slog.Warn("got more data than expected from upstream", slog.Uint64("expectedSize", msgSize), slog.Int("actualSize", n), srcAttr, dstAttr)
+		if uint64(total) > msgSize {
+			slog.Warn("got more data than expected from upstream", slog.Uint64("expectedSize", msgSize), slog.Int("actualSize", total), srcAttr, dstAttr)
 			return
 		}
-		if uint64(n) == msgSize {
+		if uint64(total) == msgSize {
 			break
 		}
 	}
