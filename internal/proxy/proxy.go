@@ -33,6 +33,7 @@ func New(ip net.IP, port int, timeout time.Duration) *Proxy {
 }
 
 func (p *Proxy) Start() {
+	slog.Info("starting proxy", slog.String("listen", p.addr.String()))
 	conn, err := net.ListenUDP("udp4", &p.addr)
 	if err != nil {
 		slog.Error("failed to start proxy", slog.String("error", err.Error()))
@@ -56,6 +57,8 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 	defer p.pool.Put(bufs)
 	srcAttr := slog.String("src", src.String())
 
+	slog.Debug("received message", srcAttr)
+
 	if flags&syscall.MSG_TRUNC != 0 {
 		slog.Warn("data was truncated", srcAttr)
 		return
@@ -75,6 +78,7 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 	}
 	dstAttr := slog.String("dst", dst.String())
 
+	slog.Debug("connecting to upstream", srcAttr, dstAttr)
 	deadline := time.Now().Add(p.timeout)
 	tcpConn, err := net.DialTimeout("tcp4", dst.String(), p.timeout)
 	if err != nil {
@@ -83,6 +87,7 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 	}
 	defer tcpConn.Close()
 
+	slog.Debug("sending original message to upstream", srcAttr, dstAttr)
 	tcpConn.SetDeadline(deadline)
 	_, err = tcpConn.Write(payload)
 	if err != nil {
@@ -90,6 +95,7 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 		return
 	}
 
+	slog.Debug("receiving response message from upstream", srcAttr, dstAttr)
 	var n, total int
 	for {
 		n, err = tcpConn.Read(bufs.buf[n:])
@@ -117,6 +123,7 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 		}
 	}
 
+	slog.Debug("sending response message to client", srcAttr, dstAttr)
 	_, err = udpConn.WriteToUDP(bufs.buf[:total], src)
 	if err != nil {
 		slog.Warn("failed to send response", srcAttr, dstAttr, slog.String("error", err.Error()))
