@@ -18,17 +18,17 @@ func main() {
 
 	ipaddr := net.ParseIP(*ip)
 	if ipaddr == nil {
-		fmt.Printf("invalid IP address: %q\n", *ip)
+		fmt.Fprintf(os.Stderr, "invalid IP address: %q\n", *ip)
 		os.Exit(1)
 	}
 
 	if *port < 1 || *port > 65535 {
-		fmt.Printf("port must be in range 1-65535, got %d\n", *port)
+		fmt.Fprintf(os.Stderr, "port must be in range 1-65535, got %d\n", *port)
 		os.Exit(1)
 	}
 
 	if *timeout < 0 {
-		fmt.Printf("timeout must be greater than 0, got %d\n", *timeout)
+		fmt.Fprintf(os.Stderr, "timeout must be greater than 0, got %d\n", *timeout)
 		os.Exit(1)
 	}
 
