@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -13,6 +14,10 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+const LDAP_TAG_SEQUENCE = 0x30
+const LDAP_TAG_INTEGER = 0x02
+const LDAP_PROTO_SEARCH_RESULT_DONE = 0x65
 
 type msgbufs struct {
 	buf []byte
@@ -90,7 +95,7 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 		return
 	}
 
-	payload := bufs.buf[:bufn]
+	reqBuf := bufs.buf[:bufn]
 	oob := bufs.oob[:oobn]
 
 	dst, err := parseOrigDst(oob)
@@ -99,6 +104,20 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 		return
 	}
 	dstAttr := slog.String("dst", dst.String())
+
+	reqMsg, _, ok, err := readLdapMessage(reqBuf)
+	if !ok {
+		err = errors.New("incomplete message")
+	}
+	if err != nil {
+		slog.Warn("failed to parse message", srcAttr, slog.String("error", err.Error()))
+		return
+	}
+	reqID, _, err := reqMsg.messageIdAndProto()
+	if err != nil {
+		slog.Warn("failed to parse message", srcAttr, slog.String("error", err.Error()))
+		return
+	}
 
 	slog.Debug("connecting to upstream", srcAttr, dstAttr)
 	deadline := time.Now().Add(p.timeout)
@@ -111,37 +130,44 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 
 	slog.Debug("sending original message to upstream", srcAttr, dstAttr)
 	tcpConn.SetDeadline(deadline)
-	_, err = tcpConn.Write(payload)
+	_, err = tcpConn.Write(reqBuf)
 	if err != nil {
 		slog.Warn("failed to write message to upstream", srcAttr, dstAttr, slog.String("error", err.Error()))
 		return
 	}
 
 	slog.Debug("receiving response message from upstream", srcAttr, dstAttr)
-	var n, total int
+	var msgStart, n, total int
 	for {
-		n, err = tcpConn.Read(bufs.buf[n:])
-		if err != nil {
-			slog.Warn("failed to read response from upstream", srcAttr, dstAttr, slog.String("error", err.Error()))
-			return
-		}
-		total += n
-
-		msgSize, err := ldapMessageSize(bufs.buf[:total])
+		msg, off, ok, err := readLdapMessage(bufs.buf[msgStart:total])
 		if err != nil {
 			slog.Warn("failed to parse response from upstream", srcAttr, dstAttr, slog.String("error", err.Error()))
 			return
 		}
-		if msgSize > uint64(len(bufs.buf)) {
-			slog.Warn("LDAP message too large", slog.Uint64("size", msgSize), srcAttr, dstAttr)
-			return
+		if ok {
+			id, proto, err := msg.messageIdAndProto()
+			if err != nil {
+				slog.Warn("failed to parse response from upstream", srcAttr, dstAttr, slog.String("error", err.Error()))
+				return
+			}
+			if id != reqID {
+				reqIDAttr := slog.Int("reqID", int(reqID))
+				rspIDAttr := slog.Int("rspID", int(id))
+				slog.Warn("upstream response messageID does not match request", srcAttr, dstAttr, reqIDAttr, rspIDAttr)
+				return
+			}
+			if proto == LDAP_PROTO_SEARCH_RESULT_DONE {
+				break
+			}
+			msgStart = off
+			continue
 		}
-		if uint64(total) > msgSize {
-			slog.Warn("got more data than expected from upstream", slog.Uint64("expectedSize", msgSize), slog.Int("actualSize", total), srcAttr, dstAttr)
+
+		n, err = tcpConn.Read(bufs.buf[total:])
+		total += n
+		if err != nil {
+			slog.Warn("failed to read response from upstream", srcAttr, dstAttr, slog.String("error", err.Error()))
 			return
-		}
-		if uint64(total) == msgSize {
-			break
 		}
 	}
 
@@ -179,30 +205,102 @@ func parseOrigDst(oob []byte) (*net.UDPAddr, error) {
 	return nil, fmt.Errorf("ORIGDSTADDR not found in control data")
 }
 
-func ldapMessageSize(payload []byte) (uint64, error) {
-	if len(payload) < 2 {
-		return 0, fmt.Errorf("truncated message, need at least 2 bytes")
+type ldapMessage struct {
+	buf       []byte
+	seqOffset int
+}
+
+func readLdapMessage(buf []byte) (msg *ldapMessage, end int, ok bool, err error) {
+	if len(buf) < 2 {
+		return nil, 0, false, nil
 	}
-	if payload[0] != 0x30 {
-		return 0, fmt.Errorf("not a valid ASN.1/BER encoded LDAPMessage")
+	if buf[0] != LDAP_TAG_SEQUENCE {
+		return nil, 0, false, fmt.Errorf("expected SEQUENCE tag (0x%x) at start of LDAP message", LDAP_TAG_SEQUENCE)
 	}
 
-	b1 := payload[1]
-	if b1 < 0x80 {
-		return 2 + uint64(b1), nil
-	} else if b1 == 0x80 {
-		return 0, fmt.Errorf("indefinite length")
+	size, hdrSize, enough, err := berSizeAt(buf, 1)
+	if err != nil {
+		return nil, 0, false, err
 	}
-	n := int(b1 & 0x7F)
+
+	if !enough {
+		return nil, 0, false, nil
+	}
+
+	totalSize := 1 + hdrSize + size
+	if len(buf) < totalSize {
+		return nil, 0, false, nil
+	}
+
+	msg = &ldapMessage{buf: buf[:totalSize], seqOffset: 1 + hdrSize}
+	return msg, totalSize, true, nil
+}
+
+func (msg *ldapMessage) messageIdAndProto() (uint32, byte, error) {
+	if msg.seqOffset >= len(msg.buf) || msg.buf[msg.seqOffset] != LDAP_TAG_INTEGER {
+		return 0, 0, fmt.Errorf("expected INTEGER tag (0x%x) for messageID", LDAP_TAG_INTEGER)
+	}
+
+	idSize, idHdrSize, enough, err := berSizeAt(msg.buf, msg.seqOffset+1)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	if !enough || msg.seqOffset+1+idHdrSize+idSize > len(msg.buf) {
+		return 0, 0, errors.New("expected INTEGER value")
+	}
+
+	idStart := msg.seqOffset + 1 + idHdrSize
+	idBytes := msg.buf[idStart : idStart+idSize]
+
+	if len(idBytes) == 0 {
+		return 0, 0, errors.New("empty INTEGER value")
+	}
+	if idBytes[0]&0x80 != 0 {
+		return 0, 0, errors.New("negative messageID")
+	}
+	if len(idBytes) > 8 {
+		return 0, 0, errors.New("messageID too large")
+	}
+	var id uint64
+	for _, b := range idBytes {
+		id = (id << 8) | uint64(b)
+	}
+
+	if id > 0x7FFF_FFFF {
+		return 0, 0, fmt.Errorf("messageID out of range (%d)", id)
+	}
+
+	protoOffset := idStart + idSize
+	if protoOffset >= len(msg.buf) {
+		return 0, 0, errors.New("expected protocolOp tag")
+	}
+
+	return uint32(id), msg.buf[protoOffset], nil
+}
+
+func berSizeAt(buf []byte, off int) (size, consumed int, ok bool, err error) {
+	if off >= len(buf) {
+		return 0, 0, false, nil
+	}
+
+	b := buf[off]
+	if b < 0x80 {
+		return int(b), 1, true, nil
+	} else if b == 0x80 {
+		return 0, 0, false, errors.New("indefinite length")
+	}
+	n := int(b & 0x7F)
 	if n > 8 {
-		return 0, fmt.Errorf("length-of-length too large (%d)", n)
+		return 0, 0, false, fmt.Errorf("length-of-length too large (%d)", n)
 	}
-	if len(payload) < 2+n {
-		return 0, fmt.Errorf("truncated message, need at least %d bytes", 2+n)
+	if off+1+n > len(buf) {
+		return 0, 0, false, nil
 	}
 
-	var buf [8]byte
-	copy(buf[8-n:], payload[2:2+n])
-	contentLen := binary.BigEndian.Uint64(buf[:])
-	return uint64(2+n) + contentLen, nil
+	var s uint64
+	for i := range n {
+		s = (s << 8) | uint64(buf[off+1+i])
+	}
+	return int(s), 1 + n, true, nil
 }
