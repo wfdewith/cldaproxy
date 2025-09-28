@@ -76,11 +76,11 @@ func (p *Proxy) Start() {
 			p.pool.Put(bufs)
 			continue
 		}
-		go p.processMessage(conn, bufn, oobn, flags, src, bufs)
+		go p.processMessage(bufn, oobn, flags, src, bufs)
 	}
 }
 
-func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src *net.UDPAddr, bufs msgbufs) {
+func (p *Proxy) processMessage(bufn, oobn, flags int, src *net.UDPAddr, bufs msgbufs) {
 	defer p.pool.Put(bufs)
 	srcAttr := slog.String("src", src.String())
 
@@ -172,7 +172,30 @@ func (p *Proxy) processMessage(udpConn *net.UDPConn, bufn, oobn, flags int, src 
 	}
 
 	slog.Debug("sending response message to client", srcAttr, dstAttr)
-	_, err = udpConn.WriteToUDP(bufs.buf[:total], src)
+	dialer := net.Dialer{
+		LocalAddr: dst,
+		Control: func(network, address string, rawConn syscall.RawConn) error {
+			var innerErr error
+			outerErr := rawConn.Control(func(fd uintptr) {
+				if err := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
+					innerErr = fmt.Errorf("setsockopt IP_TRANSPARENT: %w", err)
+					return
+				}
+			})
+			if innerErr != nil {
+				return innerErr
+			}
+			return outerErr
+		},
+	}
+	udpConn, err := dialer.Dial("udp4", src.String())
+	if err != nil {
+		slog.Warn("failed to create socket to send response", srcAttr, dstAttr, slog.String("error", err.Error()))
+		return
+	}
+	defer udpConn.Close()
+
+	_, err = udpConn.Write(bufs.buf[:total])
 	if err != nil {
 		slog.Warn("failed to send response", srcAttr, dstAttr, slog.String("error", err.Error()))
 		return
