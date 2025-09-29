@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"sync"
 	"syscall"
 	"time"
 
@@ -19,22 +18,17 @@ const LDAP_TAG_SEQUENCE = 0x30
 const LDAP_TAG_INTEGER = 0x02
 const LDAP_PROTO_SEARCH_RESULT_DONE = 0x65
 
-type msgbufs struct {
-	buf []byte
-	oob []byte
-}
-
 type Proxy struct {
-	addr    net.UDPAddr
-	timeout time.Duration
-	pool    sync.Pool
+	addr     net.UDPAddr
+	timeout  time.Duration
+	connPool *spoofedConnPool
 }
 
 func New(port int, timeout time.Duration) *Proxy {
 	return &Proxy{
-		addr:    net.UDPAddr{IP: net.IPv4zero, Port: port},
-		timeout: timeout,
-		pool:    sync.Pool{New: func() any { return msgbufs{buf: make([]byte, 65535), oob: make([]byte, 1024)} }},
+		addr:     net.UDPAddr{IP: net.IPv4zero, Port: port},
+		timeout:  timeout,
+		connPool: newSpoofedConnPool(),
 	}
 }
 
@@ -69,34 +63,32 @@ func (p *Proxy) Start() {
 	defer conn.Close()
 
 	for {
-		bufs := p.pool.Get().(msgbufs)
-		bufn, oobn, flags, src, err := conn.ReadMsgUDP(bufs.buf, bufs.oob)
+		buf := make([]byte, 65536)
+		oob := make([]byte, 1024)
+		bufn, oobn, flags, src, err := conn.ReadMsgUDP(buf, oob)
 		if err != nil {
 			slog.Warn("failed to read UDP message", slog.String("error", err.Error()))
-			p.pool.Put(bufs)
 			continue
 		}
-		go p.processMessage(bufn, oobn, flags, src, bufs)
+
+		srcAttr := slog.String("src", src.String())
+
+		slog.Debug("received message", srcAttr)
+		if flags&syscall.MSG_TRUNC != 0 {
+			slog.Warn("data was truncated", srcAttr)
+			return
+		}
+		if flags&syscall.MSG_CTRUNC != 0 {
+			slog.Warn("control data was truncated", srcAttr)
+			return
+		}
+
+		go p.processMessage(buf[:bufn], oob[:oobn], buf, src)
 	}
 }
 
-func (p *Proxy) processMessage(bufn, oobn, flags int, src *net.UDPAddr, bufs msgbufs) {
-	defer p.pool.Put(bufs)
+func (p *Proxy) processMessage(buf, oob, fullBuf []byte, src *net.UDPAddr) {
 	srcAttr := slog.String("src", src.String())
-
-	slog.Debug("received message", srcAttr)
-
-	if flags&syscall.MSG_TRUNC != 0 {
-		slog.Warn("data was truncated", srcAttr)
-		return
-	}
-	if flags&syscall.MSG_CTRUNC != 0 {
-		slog.Warn("control data was truncated", srcAttr)
-		return
-	}
-
-	reqBuf := bufs.buf[:bufn]
-	oob := bufs.oob[:oobn]
 
 	dst, err := parseOrigDst(oob)
 	if err != nil {
@@ -105,7 +97,7 @@ func (p *Proxy) processMessage(bufn, oobn, flags int, src *net.UDPAddr, bufs msg
 	}
 	dstAttr := slog.String("dst", dst.String())
 
-	reqMsg, _, ok, err := readLdapMessage(reqBuf)
+	reqMsg, _, ok, err := readLdapMessage(buf)
 	if !ok {
 		err = errors.New("incomplete message")
 	}
@@ -130,7 +122,7 @@ func (p *Proxy) processMessage(bufn, oobn, flags int, src *net.UDPAddr, bufs msg
 
 	slog.Debug("sending original message to upstream", srcAttr, dstAttr)
 	tcpConn.SetDeadline(deadline)
-	_, err = tcpConn.Write(reqBuf)
+	_, err = tcpConn.Write(buf)
 	if err != nil {
 		slog.Warn("failed to write message to upstream", srcAttr, dstAttr, slog.String("error", err.Error()))
 		return
@@ -139,7 +131,7 @@ func (p *Proxy) processMessage(bufn, oobn, flags int, src *net.UDPAddr, bufs msg
 	slog.Debug("receiving response message from upstream", srcAttr, dstAttr)
 	var msgStart, n, total int
 	for {
-		msg, off, ok, err := readLdapMessage(bufs.buf[msgStart:total])
+		msg, off, ok, err := readLdapMessage(fullBuf[msgStart:total])
 		if err != nil {
 			slog.Warn("failed to parse response from upstream", srcAttr, dstAttr, slog.String("error", err.Error()))
 			return
@@ -163,7 +155,7 @@ func (p *Proxy) processMessage(bufn, oobn, flags int, src *net.UDPAddr, bufs msg
 			continue
 		}
 
-		n, err = tcpConn.Read(bufs.buf[total:])
+		n, err = tcpConn.Read(fullBuf[total:])
 		total += n
 		if err != nil {
 			slog.Warn("failed to read response from upstream", srcAttr, dstAttr, slog.String("error", err.Error()))
@@ -172,34 +164,13 @@ func (p *Proxy) processMessage(bufn, oobn, flags int, src *net.UDPAddr, bufs msg
 	}
 
 	slog.Debug("sending response message to client", srcAttr, dstAttr)
-	dialer := net.Dialer{
-		LocalAddr: dst,
-		Control: func(network, address string, rawConn syscall.RawConn) error {
-			var innerErr error
-			outerErr := rawConn.Control(func(fd uintptr) {
-				if err := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
-					innerErr = fmt.Errorf("setsockopt IP_TRANSPARENT: %w", err)
-					return
-				}
-			})
-			if innerErr != nil {
-				return innerErr
-			}
-			return outerErr
-		},
-	}
-	udpConn, err := dialer.Dial("udp4", src.String())
-	if err != nil {
-		slog.Warn("failed to create socket to send response", srcAttr, dstAttr, slog.String("error", err.Error()))
-		return
-	}
-	defer udpConn.Close()
-
-	_, err = udpConn.Write(bufs.buf[:total])
+	rsp := &ldapResponse{msg: fullBuf[:total], dst: src}
+	spoofedConn, err := p.connPool.get(dst)
 	if err != nil {
 		slog.Warn("failed to send response", srcAttr, dstAttr, slog.String("error", err.Error()))
 		return
 	}
+	spoofedConn.send(rsp)
 }
 
 func parseOrigDst(oob []byte) (*net.UDPAddr, error) {
