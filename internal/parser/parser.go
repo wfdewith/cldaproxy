@@ -1,25 +1,37 @@
-package proxy
+package parser
 
 import (
 	"errors"
 	"fmt"
 )
 
-const LDAP_TAG_SEQUENCE = 0x30
-const LDAP_TAG_INTEGER = 0x02
-const LDAP_PROTO_SEARCH_RESULT_DONE = 0x65
+const ldapTagSequence = 0x30
+const ldapTagInteger = 0x02
+const ldapProtoSearchResultDone = 0x65
 
-type ldapMessage struct {
-	buf       []byte
-	seqOffset int
+type LDAPMessage struct {
+	Data  []byte
+	MsgID uint32
+	Proto byte
 }
 
-func readLdapMessage(buf []byte) (msg *ldapMessage, end int, ok bool, err error) {
+func Parse(buf []byte) (*LDAPMessage, error) {
+	msg, _, ok, err := TryParse(buf)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("incomplete message")
+	}
+	return msg, nil
+}
+
+func TryParse(buf []byte) (msg *LDAPMessage, end int, ok bool, err error) {
 	if len(buf) < 2 {
 		return nil, 0, false, nil
 	}
-	if buf[0] != LDAP_TAG_SEQUENCE {
-		return nil, 0, false, fmt.Errorf("expected SEQUENCE tag (0x%x) at start of LDAP message", LDAP_TAG_SEQUENCE)
+	if buf[0] != ldapTagSequence {
+		return nil, 0, false, fmt.Errorf("expected SEQUENCE tag (0x%x) at start of LDAP message", ldapTagSequence)
 	}
 
 	size, hdrSize, enough, err := berSizeAt(buf, 1)
@@ -36,26 +48,34 @@ func readLdapMessage(buf []byte) (msg *ldapMessage, end int, ok bool, err error)
 		return nil, 0, false, nil
 	}
 
-	msg = &ldapMessage{buf: buf[:totalSize], seqOffset: 1 + hdrSize}
+	id, proto, err := messageIdAndProto(buf[:totalSize], 1+hdrSize)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	msg = &LDAPMessage{Data: buf[:totalSize], MsgID: id, Proto: proto}
 	return msg, totalSize, true, nil
 }
 
-func (msg *ldapMessage) messageIdAndProto() (uint32, byte, error) {
-	if msg.seqOffset >= len(msg.buf) || msg.buf[msg.seqOffset] != LDAP_TAG_INTEGER {
-		return 0, 0, fmt.Errorf("expected INTEGER tag (0x%x) for messageID", LDAP_TAG_INTEGER)
+func (msg *LDAPMessage) IsDone() bool {
+	return msg.Proto == ldapProtoSearchResultDone
+}
+
+func messageIdAndProto(buf []byte, offset int) (uint32, byte, error) {
+	if offset >= len(buf) || buf[offset] != ldapTagInteger {
+		return 0, 0, fmt.Errorf("expected INTEGER tag (0x%x) for messageID", ldapTagInteger)
 	}
 
-	idSize, idHdrSize, enough, err := berSizeAt(msg.buf, msg.seqOffset+1)
+	idSize, idHdrSize, enough, err := berSizeAt(buf, offset+1)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	if !enough || msg.seqOffset+1+idHdrSize+idSize > len(msg.buf) {
+	if !enough || offset+1+idHdrSize+idSize > len(buf) {
 		return 0, 0, errors.New("expected INTEGER value")
 	}
 
-	idStart := msg.seqOffset + 1 + idHdrSize
-	idBytes := msg.buf[idStart : idStart+idSize]
+	idStart := offset + 1 + idHdrSize
+	idBytes := buf[idStart : idStart+idSize]
 
 	if len(idBytes) == 0 {
 		return 0, 0, errors.New("empty INTEGER value")
@@ -76,11 +96,11 @@ func (msg *ldapMessage) messageIdAndProto() (uint32, byte, error) {
 	}
 
 	protoOffset := idStart + idSize
-	if protoOffset >= len(msg.buf) {
+	if protoOffset >= len(buf) {
 		return 0, 0, errors.New("expected protocolOp tag")
 	}
 
-	return uint32(id), msg.buf[protoOffset], nil
+	return uint32(id), buf[protoOffset], nil
 }
 
 func berSizeAt(buf []byte, off int) (size, consumed int, ok bool, err error) {
