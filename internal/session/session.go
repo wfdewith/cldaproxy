@@ -45,7 +45,7 @@ func (s *LDAPSession) waitForResponse(reqMsgID uint32) ([]*parser.LDAPMessage, e
 		}
 		if ok {
 			if reqMsgID != msg.MsgID {
-				return nil, fmt.Errorf("upstream response messageID (%d) oes not match request messageID (%d)", msg.MsgID, reqMsgID)
+				return nil, fmt.Errorf("upstream response messageID (%d) does not match request messageID (%d)", msg.MsgID, reqMsgID)
 			}
 			msgs = append(msgs, msg)
 			if msg.IsDone() {
