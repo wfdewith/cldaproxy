@@ -14,6 +14,7 @@ func main() {
 	port := flag.Int("port", 3890, "listen port")
 	timeout := flag.Int("timeout", 5, "timeout in seconds for communicating with upstream")
 	debug := flag.Bool("debug", false, "print debugging logs")
+	suppresstimestamps := flag.Bool("suppresstimestamps", false, "do not print timestamps in logs")
 	flag.Parse()
 
 	if *port < 1 || *port > 65535 {
@@ -27,7 +28,21 @@ func main() {
 	}
 
 	logLevel := new(slog.LevelVar)
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	removeTime := func(groups []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey && len(groups) == 0 {
+			return slog.Attr{}
+		}
+		return a
+	}
+
+	var options *slog.HandlerOptions
+	if *suppresstimestamps {
+		options = &slog.HandlerOptions{Level: logLevel, ReplaceAttr: removeTime}
+	} else {
+		options = &slog.HandlerOptions{Level: logLevel}
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, options))
 	slog.SetDefault(logger)
 
 	if *debug {
