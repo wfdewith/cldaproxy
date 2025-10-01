@@ -41,6 +41,7 @@ func (cr *CLDAPResponder) connFor(src *net.UDPAddr) (conn *responderConn, err er
 
 	if !ok {
 		cr.mtx.Lock()
+		defer cr.mtx.Unlock()
 		// We must check again if the connection is created because it may be
 		// created between unlocking the read lock and locking the write lock.
 		conn, ok = cr.conns[src.AddrPort()]
@@ -48,11 +49,9 @@ func (cr *CLDAPResponder) connFor(src *net.UDPAddr) (conn *responderConn, err er
 			logger.Debug("creating new socket")
 			conn, err = createResponderConn(src)
 			if err != nil {
-				cr.mtx.Unlock()
 				return nil, err
 			}
 			cr.conns[src.AddrPort()] = conn
-			cr.mtx.Unlock()
 			go conn.listen()
 		}
 	} else {
