@@ -95,10 +95,9 @@ original destination IP and port (it is possible for TCP[^1]).
 
 [^1]: TCP creates a new socket for every accepted connection. You can call
   `getsockopt(sockfd, SOL_IP, SO_ORIGINAL_DST, ...)` on this socket to retrieve
-  the original destination from the conntrack table in the kernel. However, UDP
-  has no connection sockets because it is connectionless, so the kernel does not
-  need to keep track of UDP in the conntrack table and there is no socket to
-  call `getsockopt` on.
+  the original destination from the conntrack table in the kernel. In contrast,
+  UDP is connectionless, so the kernel does not keep track of UDP in the
+  conntrack table and there is no connection socket to call `getsockopt` on.
 
 `cldaproxy.sh` simply ignores the original destination and forwards all messages
 to a single LDAP server through `socat`. It finds this LDAP server by finding
