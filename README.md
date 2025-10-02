@@ -106,10 +106,10 @@ first one. This means that one instance of `cldaproxy.sh` can only ever support
 a single domain.
 
 In contrast, `cldaproxy` uses the `TPROXY` target and an alternative routing
-table that redirects all traffic to the loopback interface. This causes all
-packets to arrive with their original destination IP address and port intact.
-The original destination can be retrieved through ancillary data (see
-`recvmsg(3)`).
+table that redirects all CLDAP traffic (that is: UDP on port 389) to the
+loopback interface. This causes all packets to arrive with their original
+destination IP address and port intact. The original destination can be
+retrieved through ancillary data (see `recvmsg(3)`).
 
 When `cldaproxy` receives a packet, it will retrieve its original destination
 and then set up a TCP connection to this destination and forward the packet
