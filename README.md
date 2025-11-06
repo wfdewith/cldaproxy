@@ -102,14 +102,17 @@ original destination IP and port (it is possible for TCP[^1]).
 `cldaproxy.sh` simply ignores the original destination and forwards all messages
 to a single LDAP server through `socat`. It finds this LDAP server by finding
 all LDAP servers in the domain through the DNS SRV record and selecting the
-first one. This means that one instance of `cldaproxy.sh` can only ever support
-a single domain.
+first one. This means that one instance of `cldaproxy.sh` can only support a
+single domain. It also means that starting `cldaproxy.sh` is dependent on
+functional DNS to the target network.
 
 In contrast, `cldaproxy` uses the `TPROXY` target and an alternative routing
 table that redirects all CLDAP traffic (that is: UDP on port 389) to the
 loopback interface. This causes all packets to arrive with their original
 destination IP address and port intact. The original destination can be
-retrieved through ancillary data (see `recvmsg(3)`).
+retrieved through ancillary data (see `recvmsg(3)`). `cldaproxy` does not
+depend on DNS when starting, because it only deals with IP addresses. The
+Windows LOFL VM is responsible for resolving the target LDAP server.
 
 When `cldaproxy` receives a packet, it will retrieve its original destination
 and then set up a TCP connection to this destination and forward the packet
