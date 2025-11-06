@@ -4,7 +4,7 @@
 transport, over normal LDAP, which uses TCP. This is useful for Red Teaming
 operations where the Red Teamer uses a Windows VM transparently connected to the
 target network through SOCKS, as described in @bitsadmin's
-[Living of the Foreign Land (LOFL)](https://github.com/bitsadmin/lofl).
+[Living Off the Foreign Land (LOFL)](https://github.com/bitsadmin/lofl).
 
 `cldaproxy` replaces the `cldaproxy.sh` script from the repository mentioned
 above. The main difference in this implementation is support for transparent
